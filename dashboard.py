@@ -419,9 +419,9 @@ st.write("")
 # ==================================================
 
 (tab_res, tab_tend, tab_est, tab_proc, tab_oferta,
- tab_comp, tab_datos, tab_cal) = st.tabs(
+ tab_comp, tab_datos, tab_cal, tab_pred) = st.tabs(
     ["📊 Resumen", "📈 Tendencias", "🌤️ Estacionalidad", "🌎 Procedencia",
-     "🏨 Oferta y ocupación", "⚖️ Comparador", "📋 Datos", "🔍 Calidad"]
+     "🏨 Oferta y ocupación", "⚖️ Comparador", "📋 Datos", "🔍 Calidad", "🔮 Pronósticos"]
 )
 
 # ---------------- RESUMEN ----------------
@@ -841,3 +841,173 @@ st.caption(
     "Business Analytics · Hoteles Puno | Universidad Nacional del Altiplano | "
     "Periodo 2019-2025 | Fuente declarada: MINCETUR"
 )
+
+
+# ---------------- ANALÍTICA PREDICTIVA ----------------
+with tab_pred:
+    st.subheader("🔮 Analítica predictiva | Demanda hotelera de Puno")
+    st.caption("Fuente: MINCETUR · Arribos mensuales. Los pronósticos son estimaciones, no reservas confirmadas.")
+    st.info("Esta sección utiliza la clase y categoría elegidas en la barra lateral, "
+            "pero analiza todos los meses históricos disponibles para evitar entrenar con una serie incompleta.")
+
+    historico = (serie_base[["ANIO", "MES", "FECHA", "ARRIBOS"]]
+                 .dropna(subset=["ARRIBOS"])
+                 .sort_values("FECHA")
+                 .drop_duplicates(subset=["ANIO", "MES"]))
+    historico["ARRIBOS"] = pd.to_numeric(historico["ARRIBOS"], errors="coerce")
+    historico = historico.dropna(subset=["ARRIBOS"])
+
+    # Evaluación temporal fuera de muestra: se predice 2024 exclusivamente con 2023.
+    real_2024 = historico[historico["ANIO"] == 2024][["MES", "ARRIBOS"]].rename(columns={"ARRIBOS": "Real 2024"})
+    base_2023 = historico[historico["ANIO"] == 2023][["MES", "ARRIBOS"]].rename(columns={"ARRIBOS": "Pronóstico 2024"})
+    validacion = real_2024.merge(base_2023, on="MES", how="inner").sort_values("MES")
+
+    if len(validacion) == 12 and (validacion["Real 2024"] > 0).all():
+        validacion["Error absoluto"] = (validacion["Real 2024"] - validacion["Pronóstico 2024"]).abs()
+        mae = validacion["Error absoluto"].mean()
+        mape = (validacion["Error absoluto"] / validacion["Real 2024"]).mean() * 100
+        a, b, c = st.columns(3)
+        a.metric("Meses evaluados", "12")
+        b.metric("MAE (arribos)", f"{mae:,.0f}")
+        c.metric("MAPE (%)", f"{mape:.2f} %")
+        st.markdown("**Validación del método estacional ingenuo: 2024 frente a 2023**")
+        fig_v = go.Figure()
+        fig_v.add_trace(go.Scatter(x=validacion["MES"], y=validacion["Real 2024"],
+                                   mode="lines+markers", name="Real 2024", line=dict(color=AZUL)))
+        fig_v.add_trace(go.Scatter(x=validacion["MES"], y=validacion["Pronóstico 2024"],
+                                   mode="lines+markers", name="Pronóstico usando 2023",
+                                   line=dict(color=NARANJA, dash="dash")))
+        fig_v.update_layout(xaxis=dict(title="Mes", tickmode="array", tickvals=list(range(1, 13)),
+                                       ticktext=list(MESES_CORTO.values())),
+                            yaxis_title="Arribos", legend_title="Serie", height=410)
+        st.plotly_chart(fig_v, use_container_width=True)
+        st.dataframe(validacion.rename(columns={"MES": "Mes"}), use_container_width=True, hide_index=True)
+        st.caption("MAE: error absoluto medio en arribos. MAPE: error porcentual absoluto medio. "
+                   "La prueba de 2024 es retrospectiva y no garantiza precisión en otros años.")
+    else:
+        st.warning("No existen 12 meses comparables entre 2023 y 2024 para esta categoría. "
+                   "No se calculan métricas de validación incompletas.")
+
+    st.divider()
+    st.markdown("### Proyección exploratoria a cinco años · 2026–2030")
+    st.caption(
+        "Escenario de planificación, no pronóstico estadístico validado a cinco años. "
+        "Se utiliza la estacionalidad mensual promedio de 2022–2024 y una tasa anual "
+        "de crecimiento ajustable. El año 2025 no se usa como año completo porque "
+        "solo contiene enero–junio."
+    )
+
+    base_proy = historico[historico["ANIO"].between(2022, 2024)].copy()
+    conteos = base_proy.groupby("MES")["ANIO"].nunique()
+    if len(conteos) == 12 and conteos.eq(3).all():
+        # Promedio estacional mensual: mismo mes en 2022, 2023 y 2024.
+        patron = base_proy.groupby("MES", as_index=False)["ARRIBOS"].mean()
+        patron = patron.rename(columns={"ARRIBOS": "BASE_MENSUAL"})
+
+        st.markdown("**Configura tu escenario**")
+        c_esc1, c_esc2, c_esc3 = st.columns(3)
+        with c_esc1:
+            tasa = st.slider(
+                "Variación anual supuesta (%)", min_value=-10.0,
+                max_value=10.0, value=0.0, step=0.5,
+                help="Supuesto modificable; no es una tasa calculada ni garantizada."
+            )
+        with c_esc2:
+            anio_elegido = st.selectbox("Año para detalle mensual", [2026, 2027, 2028, 2029, 2030])
+        with c_esc3:
+            horizonte_anios = st.select_slider("Años a mostrar", options=[1, 2, 3, 4, 5], value=5)
+
+        filas = []
+        for anio in range(2026, 2031):
+            # Ancla explícita en 2024: se aplica la tasa desde 2025.
+            factor = (1 + tasa / 100.0) ** (anio - 2024)
+            for _, fila in patron.iterrows():
+                mes = int(fila["MES"])
+                estimado = max(0, round(float(fila["BASE_MENSUAL"]) * factor))
+                filas.append({
+                    "Año": anio, "Mes número": mes, "Mes": MESES[mes],
+                    "Fecha": pd.Timestamp(year=anio, month=mes, day=1),
+                    "Arribos estimados": estimado,
+                })
+        proyeccion = pd.DataFrame(filas)
+        proyeccion_visible = proyeccion[proyeccion["Año"] <= 2025 + horizonte_anios].copy()
+        anual_proy = (proyeccion_visible.groupby("Año", as_index=False)["Arribos estimados"].sum())
+
+        st.info(
+            f"Escenario seleccionado: {tasa:+.1f}% anual, aplicado al patrón estacional "
+            "promedio de 2022–2024 (anclado en 2024). Los valores futuros "
+            "son hipotéticos y dependen del supuesto elegido."
+        )
+        a1, a2, a3 = st.columns(3)
+        a1.metric("Años proyectados", str(horizonte_anios))
+        a2.metric("Arribos estimados en 2026", f"{int(proyeccion.loc[proyeccion['Año'] == 2026, 'Arribos estimados'].sum()):,}")
+        a3.metric("Arribos estimados en el horizonte", f"{int(anual_proy['Arribos estimados'].sum()):,}")
+
+        st.markdown("**Evolución histórica y escenario futuro**")
+        historico_plot = historico[["FECHA", "ARRIBOS"]].sort_values("FECHA")
+        fig_total = go.Figure()
+        fig_total.add_trace(go.Scatter(
+            x=historico_plot["FECHA"], y=historico_plot["ARRIBOS"],
+            name="Arribos históricos", mode="lines", line=dict(color=AZUL, width=2)
+        ))
+        fig_total.add_trace(go.Scatter(
+            x=proyeccion_visible["Fecha"], y=proyeccion_visible["Arribos estimados"],
+            name="Escenario 2026–2030", mode="lines", line=dict(color=NARANJA, width=3, dash="dash")
+        ))
+        fig_total.add_vrect(
+            x0="2026-01-01", x1=str(2025 + horizonte_anios) + "-12-31",
+            fillcolor="rgba(224,164,88,0.09)", line_width=0,
+            annotation_text="Escenario", annotation_position="top left"
+        )
+        fig_total.update_layout(
+            title="Arribos mensuales: observados frente a estimaciones",
+            xaxis_title="Fecha", yaxis_title="Arribos", hovermode="x unified"
+        )
+        grafico(estilo(fig_total, 450))
+
+        fig_anual = px.bar(
+            anual_proy, x="Año", y="Arribos estimados", text_auto=",.0f",
+            title="Escenario anual de arribos", color_discrete_sequence=[VERDE]
+        )
+        fig_anual.update_traces(textposition="outside")
+        fig_anual.update_xaxes(dtick=1)
+        grafico(estilo(fig_anual, 390))
+        st.dataframe(anual_proy, hide_index=True, width="stretch")
+
+        st.markdown(f"**Detalle mensual de {anio_elegido}**")
+        detalle = proyeccion.loc[
+            proyeccion["Año"] == anio_elegido,
+            ["Año", "Mes número", "Mes", "Arribos estimados"]
+        ].sort_values("Mes número")
+        fig_mes = px.bar(
+            detalle, x="Mes", y="Arribos estimados", text_auto=",.0f",
+            title=f"Arribos estimados por mes · {anio_elegido}",
+            category_orders={"Mes": list(MESES.values())},
+            color_discrete_sequence=[CELESTE]
+        )
+        fig_mes.update_traces(textposition="outside")
+        grafico(estilo(fig_mes, 390))
+        st.dataframe(detalle.drop(columns="Mes número"), hide_index=True, width="stretch")
+
+        st.download_button(
+            "📥 Descargar proyección completa 2026–2030 (CSV)",
+            proyeccion[["Año", "Mes", "Arribos estimados"]].to_csv(index=False).encode("utf-8-sig"),
+            file_name="puno_escenario_arribos_2026_2030.csv", mime="text/csv"
+        )
+        st.warning(
+            "Limitación: la validación MAE/MAPE anterior evalúa un método estacional ingenuo "
+            "para 2024, no la precisión del escenario ajustable 2026–2030. "
+            "No se dispone de intervalos de predicción estadísticamente calibrados. "
+            "La incertidumbre aumenta con el horizonte y el resultado no debe "
+            "usarse como compromiso de demanda ni como base única para inversiones."
+        )
+        insight(
+            "Aplicación empresarial: comparar escenarios conservadores, estables y de "
+            "crecimiento para organizar turnos, promociones y capacidad hotelera. "
+            "Antes de decidir, contrastar con reservas, ocupación y datos MINCETUR actualizados."
+        )
+    else:
+        st.warning(
+            "No hay doce meses para cada año de 2022–2024 en el segmento seleccionado; "
+            "no se genera una proyección incompleta."
+        )
